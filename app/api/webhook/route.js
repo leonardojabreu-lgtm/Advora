@@ -1,19 +1,18 @@
 // app/api/webhook/route.js
 
-const VERIFY_TOKEN = "advora_verify"; // o mesmo que você vai usar na META
+const VERIFY_TOKEN = "advora_verify"; // por enquanto só pra log
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
 
   const mode = searchParams.get("hub.mode");
   const token = searchParams.get("hub.verify_token");
-  const challenge = searchParams.get("hub.challenge");
+  const challenge = searchParams.get("hub.challenge") ?? "no-challenge";
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return new Response(challenge, { status: 200 });
-  }
+  console.log("VERIFICACAO WEBHOOK:", { mode, token, challenge });
 
-  return new Response("Forbidden", { status: 403 });
+  // NÃO vamos recusar nada aqui, só devolver o challenge
+  return new Response(challenge, { status: 200 });
 }
 
 export async function POST(request) {
