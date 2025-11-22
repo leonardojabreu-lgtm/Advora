@@ -1,22 +1,21 @@
 // app/api/webhook/route.js
 
+export const runtime = "nodejs";
+
 import OpenAI from "openai";
 
-// token usado só na VERIFICAÇÃO do webhook (GET)
 const VERIFY_TOKEN = "advora_verify";
 
-// cliente OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-// IDs e tokens vindos das variáveis de ambiente
-const CAROLINA_ID = process.env.CAROLINA_ID;           // asst_...
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;     // token permanente Meta
-const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID; // phone_number_id
+const SYSTEM_PROMPT =
+  process.env.SYSTEM_PROMPT_CAROLINA ||
+  "Você é Carolina, secretária humana do escritório ADVORA, especializada em atendimento jurídico. Fale sempre em português, de forma humana, empática e natural.";
 
-// >>> VERIFICAÇÃO DO WEBHOOK (META) <<<
-// NÃO MEXE MAIS NISSO, JÁ ESTÁ FUNCIONANDO
+// ============ VERIFICAÇÃO DO WEBHOOK (GET) ============
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
 
@@ -33,13 +32,13 @@ export async function GET(request) {
   return new Response("Forbidden", { status: 403 });
 }
 
-// >>> RECEBIMENTO DE MENSAGENS <<<
+// ============ RECEBIMENTO DE MENSAGENS (POST) ============
 
 export async function POST(request) {
   try {
     const body = await request.json().catch(() => null);
 
-    if (!body || !body.entry || !body.entry[0].changes) {
+    if (!body || !body.entry || !body.entry[0]?.changes) {
       console.log("Webhook sem conteúdo relevante:", JSON.stringify(body));
       return new Response("No body", { status: 200 });
     }
@@ -48,96 +47,68 @@ export async function POST(request) {
     const value = change.value || {};
     const message = value.messages?.[0];
 
-    // eventos de status (entregue, lido etc.) chegam sem "messages"
+    // muitos eventos (status, etc.) vêm sem "messages"
     if (!message) {
       console.log("Evento sem mensagem (provavelmente status):", JSON.stringify(value));
       return new Response("OK", { status: 200 });
     }
 
-    // só responde a mensagens de texto
     if (message.type !== "text") {
       console.log("Mensagem não-texto, ignorando:", message.type);
       return new Response("OK", { status: 200 });
     }
 
-    const from = message.from;             // número do cliente
-    const texto = message.text?.body || ""; // texto da mensagem
+    const from = message.from;                // número do cliente
+    const texto = message.text?.body || "";   // texto da mensagem
 
     console.log("Mensagem recebida do WhatsApp:", { from, texto });
 
-    if (!CAROLINA_ID || !process.env.OPENAI_API_KEY) {
-      console.error("Falta CAROLINA_ID ou OPENAI_API_KEY nas variáveis de ambiente");
+    if (!process.env.OPENAI_API_KEY) {
+      console.error("Falta OPENAI_API_KEY nas variáveis de ambiente");
       return new Response("Config error", { status: 500 });
     }
 
-    // 1) Cria uma thread para a Carolina
-    const thread = await openai.beta.threads.create();
+    // ========== CHAMADA PARA A CAROLINA (Responses API) ==========
 
-    // 2) Adiciona a mensagem do usuário
-    await openai.beta.threads.messages.create(thread.id, {
-      role: "user",
-      content: texto
+    const response = await client.responses.create({
+      model: "gpt-4o-mini",
+      system: SYSTEM_PROMPT,
+      input: texto,
     });
 
-    // 3) Executa a Carolina
-    const run = await openai.beta.threads.runs.create(thread.id, {
-      assistant_id: CAROLINA_ID
-    });
-
-    // 4) Espera a Carolina terminar (polling simples)
-    let runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
-
-    let tentativas = 0;
-    while (runStatus.status !== "completed" && tentativas < 15) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
-      tentativas++;
-    }
-
-    if (runStatus.status !== "completed") {
-      console.error("Carolina não completou a tempo:", runStatus.status);
-      return new Response("Timeout Carolina", { status: 500 });
-    }
-
-    // 5) Busca a última mensagem da Carolina
-    const mensagens = await openai.beta.threads.messages.list(thread.id);
-
-    const respostaCarolina = mensagens.data
-      .filter((m) => m.role === "assistant")[0]
-      ?.content?.[0]?.text?.value;
-
-    if (!respostaCarolina) {
-      console.error("Não foi possível extrair resposta da Carolina");
-      return new Response("Sem resposta", { status: 500 });
-    }
+    const respostaCarolina = response.output_text || "";
 
     console.log("Resposta da Carolina:", respostaCarolina);
 
-    // 6) Envia a resposta de volta pelo WhatsApp
-    if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_ID) {
+    if (!process.env.WHATSAPP_TOKEN || !process.env.WHATSAPP_PHONE_ID) {
       console.error("Faltam WHATSAPP_TOKEN ou WHATSAPP_PHONE_ID nas env vars");
       return new Response("Config error", { status: 500 });
     }
 
-    const waResponse = await fetch(
-      `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_ID}/messages`,
+    // ========== ENVIO DA RESPOSTA PARA O WHATSAPP ==========
+
+    const waRes = await fetch(
+      `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
         },
         body: JSON.stringify({
           messaging_product: "whatsapp",
           to: from,
-          text: { body: respostaCarolina }
-        })
+          text: { body: respostaCarolina.substring(0, 1000) }, // limite de segurança
+        }),
       }
     );
 
-    if (!waResponse.ok) {
-      const erroTexto = await waResponse.text();
-      console.error("Erro ao enviar mensagem para WhatsApp:", erroTexto);
+    const waText = await waRes.text();
+
+    if (!waRes.ok) {
+      console.error("Erro ao enviar mensagem para WhatsApp:", waText);
+    } else {
+      console.log("Mensagem enviada ao WhatsApp com sucesso:", waText);
     }
 
     return new Response("OK", { status: 200 });
