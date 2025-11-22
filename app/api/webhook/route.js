@@ -4,6 +4,7 @@ export const runtime = "nodejs";
 
 import OpenAI from "openai";
 
+// token usado na verificação do webhook (GET)
 const VERIFY_TOKEN = "advora_verify";
 
 const client = new OpenAI({
@@ -12,7 +13,7 @@ const client = new OpenAI({
 
 const SYSTEM_PROMPT =
   process.env.SYSTEM_PROMPT_CAROLINA ||
-  "Você é Carolina, secretária humana do escritório ADVORA, especializada em atendimento jurídico. Fale sempre em português, de forma humana, empática e natural.";
+  "Você é Carolina, secretária humana do escritório ADVORA. Seja empática, humana e natural.";
 
 // ============ VERIFICAÇÃO DO WEBHOOK (GET) ============
 
@@ -47,45 +48,39 @@ export async function POST(request) {
     const value = change.value || {};
     const message = value.messages?.[0];
 
-    // muitos eventos (status, etc.) vêm sem "messages"
     if (!message) {
       console.log("Evento sem mensagem (provavelmente status):", JSON.stringify(value));
       return new Response("OK", { status: 200 });
     }
 
     if (message.type !== "text") {
-      console.log("Mensagem não-texto, ignorando:", message.type);
+      console.log("Mensagem não-texto recebida, ignorando:", message.type);
       return new Response("OK", { status: 200 });
     }
 
-    const from = message.from;                // número do cliente
-    const texto = message.text?.body || "";   // texto da mensagem
+    const from = message.from;
+    const texto = message.text?.body || "";
 
     console.log("Mensagem recebida do WhatsApp:", { from, texto });
 
-    if (!process.env.OPENAI_API_KEY) {
-      console.error("Falta OPENAI_API_KEY nas variáveis de ambiente");
-      return new Response("Config error", { status: 500 });
-    }
+    // ========== CHAMADA À API DA OPENAI (CAROLINA) ==========
 
-    // ========== CHAMADA PARA A CAROLINA (Responses API) ==========
-
-    const response = await client.responses.create({
+    const aiResponse = await client.responses.create({
       model: "gpt-4o-mini",
-      system: SYSTEM_PROMPT,
+      instructions: SYSTEM_PROMPT,   // << AQUI ESTÁ A CORREÇÃO
       input: texto,
     });
 
-    const respostaCarolina = response.output_text || "";
+    const respostaCarolina = aiResponse.output_text || "";
 
     console.log("Resposta da Carolina:", respostaCarolina);
+
+    // ========== ENVIO DA RESPOSTA PARA O WHATSAPP ==========
 
     if (!process.env.WHATSAPP_TOKEN || !process.env.WHATSAPP_PHONE_ID) {
       console.error("Faltam WHATSAPP_TOKEN ou WHATSAPP_PHONE_ID nas env vars");
       return new Response("Config error", { status: 500 });
     }
-
-    // ========== ENVIO DA RESPOSTA PARA O WHATSAPP ==========
 
     const waRes = await fetch(
       `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
@@ -98,7 +93,7 @@ export async function POST(request) {
         body: JSON.stringify({
           messaging_product: "whatsapp",
           to: from,
-          text: { body: respostaCarolina.substring(0, 1000) }, // limite de segurança
+          text: { body: respostaCarolina.substring(0, 1000) },
         }),
       }
     );
@@ -112,8 +107,9 @@ export async function POST(request) {
     }
 
     return new Response("OK", { status: 200 });
-  } catch (e) {
-    console.error("Erro no webhook:", e);
+
+  } catch (error) {
+    console.error("Erro no webhook:", error);
     return new Response("Erro", { status: 500 });
   }
 }
