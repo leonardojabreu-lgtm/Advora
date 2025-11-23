@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 // caminho relativo da pasta app/api/webhook até a pasta lib
-import { openai, CAROLINA_MODEL } from "../../../lib/openai";
+import { openai, CAROLINA_MODEL } from "../../src/lib/openai";
 
 export const dynamic = "force-dynamic";
 
