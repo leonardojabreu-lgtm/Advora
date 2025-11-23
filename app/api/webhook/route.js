@@ -1,115 +1,64 @@
-// app/api/webhook/route.js
+// app/api/webhook/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { openai, CAROLINA_MODEL } from "@/lib/openai";
 
-export const runtime = "nodejs";
+export const dynamic = "force-dynamic"; // se estiver usando Next 13/14 app router
 
-import OpenAI from "openai";
-
-// token usado na verificação do webhook (GET)
-const VERIFY_TOKEN = "advora_verify";
-
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-const SYSTEM_PROMPT =
-  process.env.SYSTEM_PROMPT_CAROLINA ||
-  "Você é Carolina, secretária humana do escritório ADVORA. Seja empática, humana e natural.";
-
-// ============ VERIFICAÇÃO DO WEBHOOK (GET) ============
-
-export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-
-  const mode = searchParams.get("hub.mode");
-  const token = searchParams.get("hub.verify_token");
-  const challenge = searchParams.get("hub.challenge") ?? "no-challenge";
-
-  console.log("VERIFICACAO WEBHOOK:", { mode, token, challenge });
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return new Response(challenge, { status: 200 });
-  }
-
-  return new Response("Forbidden", { status: 403 });
-}
-
-// ============ RECEBIMENTO DE MENSAGENS (POST) ============
-
-export async function POST(request) {
+export async function POST(req: NextRequest) {
   try {
-    const body = await request.json().catch(() => null);
+    const body = await req.json();
 
-    if (!body || !body.entry || !body.entry[0]?.changes) {
-      console.log("Webhook sem conteúdo relevante:", JSON.stringify(body));
-      return new Response("No body", { status: 200 });
-    }
+    // aqui você extrai a mensagem do WhatsApp
+    const userMessage =
+      body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body ??
+      "Oi";
 
-    const change = body.entry[0].changes[0];
-    const value = change.value || {};
-    const message = value.messages?.[0];
+    const systemPrompt = `
+Você é a CAROLINA, secretária virtual de um escritório de advocacia especializado em:
 
-    if (!message) {
-      console.log("Evento sem mensagem (provavelmente status):", JSON.stringify(value));
-      return new Response("OK", { status: 200 });
-    }
+- Problemas com serviços essenciais (água, luz, internet/telefone)
+- Problemas com bancos (negativação indevida, débitos não reconhecidos, redução de limite etc.)
 
-    if (message.type !== "text") {
-      console.log("Mensagem não-texto recebida, ignorando:", message.type);
-      return new Response("OK", { status: 200 });
-    }
+O escritório atua principalmente em Niterói/RJ e região e possui um ADVOGADO RESPONSÁVEL TÉCNICO regularmente inscrito na OAB/RJ sob o nº 188.795.
 
-    const from = message.from;
-    const texto = message.text?.body || "";
+SEU PAPEL:
+- Fazer o PRIMEIRO ATENDIMENTO dos contatos que chegam pelo WhatsApp.
+- Gerar CONFIANÇA rápida, mostrando que é um escritório real e organizado.
+- Coletar TODAS as informações essenciais do caso.
+- Explicar, de forma simples, como funciona o atendimento do escritório.
+- Preparar um RESUMO organizado do caso para o advogado responsável e sua equipe.
+- Nunca dar opinião jurídica, nunca prometer resultado e nunca falar como se fosse o advogado.
+- Evitar falar em primeira pessoa como “obrigada por confiar em mim”; sempre responda em nome do escritório.
+`;
 
-    console.log("Mensagem recebida do WhatsApp:", { from, texto });
-
-    // ========== CHAMADA À API DA OPENAI (CAROLINA) ==========
-
-    const aiResponse = await client.responses.create({
-      model: "gpt-4o-mini",
-      instructions: SYSTEM_PROMPT,   // << AQUI ESTÁ A CORREÇÃO
-      input: texto,
+    // chamada para o modelo fine-tuned
+    const response = await openai.responses.create({
+      model: CAROLINA_MODEL,
+      input: [
+        {
+          role: "system",
+          content: systemPrompt,
+        },
+        {
+          role: "user",
+          content: userMessage,
+        },
+      ],
     });
 
-    const respostaCarolina = aiResponse.output_text || "";
+    const answer =
+      response.output?.[0]?.content?.[0]?.text ?? "Olá! Como posso te ajudar?";
 
-    console.log("Resposta da Carolina:", respostaCarolina);
-
-    // ========== ENVIO DA RESPOSTA PARA O WHATSAPP ==========
-
-    if (!process.env.WHATSAPP_TOKEN || !process.env.WHATSAPP_PHONE_ID) {
-      console.error("Faltam WHATSAPP_TOKEN ou WHATSAPP_PHONE_ID nas env vars");
-      return new Response("Config error", { status: 500 });
-    }
-
-    const waRes = await fetch(
-      `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to: from,
-          text: { body: respostaCarolina.substring(0, 1000) },
-        }),
-      }
+    // aqui você monta a resposta de volta pro WhatsApp (Meta)
+    // vou deixar genérico porque cada um monta de um jeito
+    return NextResponse.json({
+      reply: answer,
+    });
+  } catch (err) {
+    console.error(err);
+    return NextResponse.json(
+      { error: "Erro interno no webhook" },
+      { status: 500 }
     );
-
-    const waText = await waRes.text();
-
-    if (!waRes.ok) {
-      console.error("Erro ao enviar mensagem para WhatsApp:", waText);
-    } else {
-      console.log("Mensagem enviada ao WhatsApp com sucesso:", waText);
-    }
-
-    return new Response("OK", { status: 200 });
-
-  } catch (error) {
-    console.error("Erro no webhook:", error);
-    return new Response("Erro", { status: 500 });
   }
 }
