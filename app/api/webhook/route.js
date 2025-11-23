@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-// caminho relativo da pasta app/api/webhook até a pasta lib
-import { openai, CAROLINA_MODEL } from "src/lib/openai.ts";
+import { openai, CAROLINA_MODEL } from "../../src/lib/openai";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +26,7 @@ export async function POST(req) {
     const changes = entry?.changes?.[0];
     const message = changes?.value?.messages?.[0];
 
-    // Se não for mensagem de texto, ignora
+    // Se não for texto, ignora
     if (!message || !message.text || !message.text.body) {
       return NextResponse.json({ status: "ignored" });
     }
@@ -53,7 +52,7 @@ SEU PAPEL:
 - Evitar frases como “obrigada por confiar em mim”; fale sempre em nome do escritório.
 `;
 
-    // Chamada para o modelo fine-tuned (Responses API)
+    // Chamada para o modelo fine-tuned
     const response = await openai.responses.create({
       model: CAROLINA_MODEL,
       input: [
@@ -66,7 +65,7 @@ SEU PAPEL:
       response?.output?.[0]?.content?.[0]?.text ||
       "Olá! Como posso ajudar você hoje?";
 
-    // Envia a resposta para o WhatsApp
+    // Envia resposta ao WhatsApp
     await fetch(
       `https://graph.facebook.com/v22.0/${process.env.META_PHONE_ID}/messages`,
       {
