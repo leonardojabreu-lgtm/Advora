@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import OpenAI from "openai";
 
 // Configuração do cliente OpenAI
@@ -12,8 +12,8 @@ const MODEL = "ft:gpt-4o-mini-2024-07-18:personal:carolinaai:Cf3xgQkT";
 export const dynamic = "force-dynamic";
 
 // Verificação inicial da Meta (GET)
-export async function GET(req: NextRequest) {
-  const searchParams = req.nextUrl.searchParams;
+export async function GET(req) {
+  const { searchParams } = new URL(req.url);
   const mode = searchParams.get("hub.mode");
   const token = searchParams.get("hub.verify_token");
   const challenge = searchParams.get("hub.challenge");
@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
 }
 
 // Webhook (POST)
-export async function POST(req: NextRequest) {
+export async function POST(req) {
   try {
     const body = await req.json();
 
@@ -61,9 +61,7 @@ SEU PAPEL:
 - Evitar frases como “obrigada por confiar em mim”; fale sempre em nome do escritório.
 `;
 
-    // -------------------------------
-    // 🔥 CHAMADA PARA O SEU FINE-TUNED
-    // -------------------------------
+    // Chamada para o modelo fine-tuned (Responses API)
     const response = await client.responses.create({
       model: MODEL,
       input: [
@@ -79,7 +77,7 @@ SEU PAPEL:
     });
 
     const aiText =
-      response.output?.[0]?.content?.[0]?.text ??
+      response.output?.[0]?.content?.[0]?.text ||
       "Olá! Como posso ajudar você hoje?";
 
     // Enviar resposta ao WhatsApp
