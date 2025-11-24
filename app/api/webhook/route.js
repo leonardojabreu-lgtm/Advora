@@ -84,12 +84,16 @@ async function saveConversation(phone, { history, state, docs }) {
       updated_at: new Date().toISOString(),
     };
 
+    // MODELO A — sempre atualiza a mesma linha pelo PHONE
     const { error } = await supabase
       .from("conversations")
-      .upsert(payload);
+      .upsert(payload, { onConflict: "phone" });
 
     if (error) {
       console.error("Erro ao salvar conversa:", error);
+      
+      if (error?.code === "23505") {
+  console.log("Linha já existia, upsert tratou normalmente");
     }
   } catch (err) {
     console.error("Erro inesperado ao salvar conversa:", err);
