@@ -1,87 +1,116 @@
-import { NextResponse } from "next/server";
-import { openai, CAROLINA_MODEL } from "../../../lib/openai";
+// app/api/webhook/route.js
 
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-// GET – verificação do webhook da Meta
-export async function GET(req) {
-  const url = new URL(req.url);
-  const mode = url.searchParams.get("hub.mode");
-  const token = url.searchParams.get("hub.verify_token");
-  const challenge = url.searchParams.get("hub.challenge");
+import OpenAI from "openai";
 
-  if (mode === "subscribe" && token === process.env.META_VERIFY_TOKEN) {
+// token usado na verificação do webhook (GET)
+const VERIFY_TOKEN = "advora_verify";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// SYSTEM PROMPT opcional (pode complementar o fine-tuning)
+const SYSTEM_PROMPT =
+  process.env.SYSTEM_PROMPT_CAROLINA ||
+  "Você é Carolina, secretária humana do escritório ADVORA. Seja empática, humana e natural.";
+
+// ===== VERIFICAÇÃO DO WEBHOOK (GET) =====
+
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+
+  const mode = searchParams.get("hub.mode");
+  const token = searchParams.get("hub.verify_token");
+  const challenge = searchParams.get("hub.challenge") ?? "no-challenge";
+
+  console.log("VERIFICACAO WEBHOOK:", { mode, token, challenge });
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
     return new Response(challenge, { status: 200 });
   }
 
-  return new Response("Erro de verificação", { status: 403 });
+  return new Response("Forbidden", { status: 403 });
 }
 
-// POST – recebe mensagem do WhatsApp e responde com a Carolina
-export async function POST(req) {
+// ===== RECEBIMENTO DE MENSAGENS (POST) =====
+
+export async function POST(request) {
   try {
-    const body = await req.json();
+    const body = await request.json().catch(() => null);
 
-    const entry = body?.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const message = changes?.value?.messages?.[0];
-
-    // Se não for texto, ignora
-    if (!message || !message.text || !message.text.body) {
-      return NextResponse.json({ status: "ignored" });
+    if (!body || !body.entry || !body.entry[0]?.changes) {
+      console.log("Webhook sem conteúdo relevante:", JSON.stringify(body));
+      return new Response("No body", { status: 200 });
     }
 
-    const sender = message.from;
-    const userMessage = message.text.body;
+    const change = body.entry[0].changes[0];
+    const value = change.value || {};
+    const message = value.messages?.[0];
 
-    const systemPrompt = `
-Você é a CAROLINA, secretária virtual de um escritório de advocacia especializado em:
+    if (!message) {
+      console.log("Evento sem mensagem (provavelmente status):", JSON.stringify(value));
+      return new Response("OK", { status: 200 });
+    }
 
-- Problemas com serviços essenciais (água, luz, internet/telefone)
+    if (message.type !== "text") {
+      console.log("Mensagem não-texto recebida, ignorando:", message.type);
+      return new Response("OK", { status: 200 });
+    }
 
-O escritório está localizado na Rua General Andrade Neves, número 9, sala 911, Centro, Niterói e possui um ADVOGADO RESPONSÁVEL, Tiago Barbosa Bastos, regularmente inscrito na OAB/RJ sob o nº 188.795.
+    const from = message.from;
+    const texto = message.text?.body || "";
 
-SEU PAPEL:
-- Fazer o PRIMEIRO ATENDIMENTO dos contatos que chegam pelo WhatsApp.
-- Gerar CONFIANÇA rápida, mostrando que é um escritório real e organizado.
-- Coletar TODAS as informações essenciais do caso.
-- Explicar, de forma simples, como funciona o atendimento do escritório.
-- Preparar um RESUMO organizado do caso para o advogado responsável e sua equipe.
-- Nunca dar opinião jurídica, nunca prometer resultado e nunca falar como se fosse o advogado.
-- Evitar frases como “obrigada por confiar em mim”; fale sempre em nome do escritório.
-`;
+    console.log("Mensagem recebida do WhatsApp:", { from, texto });
 
-    const response = await openai.responses.create({
-      model: CAROLINA_MODEL,
-      input: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
+    // ===== CHAMADA AO MODELO FINE-TUNED =====
+
+    const aiResponse = await client.responses.create({
+      model: "ft:gpt-4o-mini-2024-07-18:personal:carolinaai:Cf3xgQkT",
+      instructions: SYSTEM_PROMPT,  // opcional, mas recomendado
+      input: texto,
     });
 
-    const aiText =
-      response?.output?.[0]?.content?.[0]?.text ||
-      "Olá! Como posso ajudar você hoje?";
+    const respostaCarolina = aiResponse.output_text || "";
 
-    await fetch(
-      `https://graph.facebook.com/v22.0/${process.env.META_PHONE_ID}/messages`,
+    console.log("Resposta da Carolina:", respostaCarolina);
+
+    // ===== ENVIO PARA O WHATSAPP =====
+
+    if (!process.env.WHATSAPP_TOKEN || !process.env.WHATSAPP_PHONE_ID) {
+      console.error("Faltam WHATSAPP_TOKEN ou WHATSAPP_PHONE_ID nas env vars");
+      return new Response("Config error", { status: 500 });
+    }
+
+    const waRes = await fetch(
+      `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
           "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
         },
         body: JSON.stringify({
           messaging_product: "whatsapp",
-          to: sender,
-          text: { body: aiText },
+          to: from,
+          text: { body: respostaCarolina.substring(0, 1000) },
         }),
       }
     );
 
-    return NextResponse.json({ status: "message_sent", reply: aiText });
+    const waText = await waRes.text();
+
+    if (!waRes.ok) {
+      console.error("Erro ao enviar mensagem para WhatsApp:", waText);
+    } else {
+      console.log("Mensagem enviada ao WhatsApp com sucesso:", waText);
+    }
+
+    return new Response("OK", { status: 200 });
+
   } catch (error) {
     console.error("Erro no webhook:", error);
-    return NextResponse.json({ error: "Erro interno" }, { status: 500 });
+    return new Response("Erro", { status: 500 });
   }
 }
