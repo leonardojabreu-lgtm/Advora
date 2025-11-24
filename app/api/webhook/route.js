@@ -1,7 +1,7 @@
 export const runtime = "nodejs";
 
 import OpenAI from "openai";
-import { supabase } from "@/lib/supabase";
+import { supabase } from "../../../lib/supabase";
 
 // token usado na verificação do webhook (GET)
 const VERIFY_TOKEN = "advora_verify";
