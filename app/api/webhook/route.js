@@ -91,9 +91,9 @@ async function saveConversation(phone, { history, state, docs }) {
 
     if (error) {
       console.error("Erro ao salvar conversa:", error);
-      
-      if (error?.code === "23505") {
-  console.log("Linha já existia, upsert tratou normalmente");
+      if (error.code === "23505") {
+        console.log("Linha já existia, upsert tratou normalmente");
+      }
     }
   } catch (err) {
     console.error("Erro inesperado ao salvar conversa:", err);
@@ -109,7 +109,8 @@ async function marcarDocumentoRecebido(phone) {
     ...conv.history,
     {
       role: "system",
-      content: "[DOCUMENTO] O usuário enviou uma imagem/arquivo (fatura ou documento).",
+      content:
+        "[DOCUMENTO] O usuário enviou uma imagem/arquivo (fatura ou documento).",
     },
   ];
 
@@ -167,19 +168,20 @@ export async function POST(request) {
       messageType,
     });
 
-    const waPhoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const waPhoneId =
+      process.env.WHATSAPP_PHONE_ID ||
+      process.env.WHATSAPP_PHONE_NUMBER_ID;
     const waToken = process.env.WHATSAPP_TOKEN;
 
-    // ========== SE FOR MÍDIA (IMAGEM/DOCUMENTO), APENAS REGISTRA DOC E AGRADECE ==========
+    // ========== SE FOR MÍDIA (IMAGEM/DOCUMENTO), APENAS REGISTRA DOC E AGREDECE ==========
     if (messageType === "image" || messageType === "document") {
       const caption =
         message.image?.caption ||
         message.document?.caption ||
         "";
 
-      const conv = await marcarDocumentoRecebido(userPhone);
+      await marcarDocumentoRecebido(userPhone);
 
-      // Mensagem curtinha de confirmação
       const ackText =
         "Perfeito, acabei de receber o documento aqui. Se tiver mais alguma conta ou comprovante, pode me enviar também. Se preferir, pode me explicar em poucas palavras o que mais está te preocupando.";
 
@@ -211,7 +213,7 @@ export async function POST(request) {
         }
       } else {
         console.error(
-          "WHATSAPP_PHONE_NUMBER_ID ou WHATSAPP_TOKEN não configurados (mensagem de mídia)"
+          "WHATSAPP_PHONE_ID/NUMBER_ID ou WHATSAPP_TOKEN não configurados (mensagem de mídia)"
         );
       }
 
@@ -238,16 +240,14 @@ export async function POST(request) {
     let systemPrompt = BASE_SYSTEM_PROMPT;
 
     if (!docs.hasMedia) {
-      // Nenhum documento ainda: Carolina fica "travada" pedindo docs
       systemPrompt += `
 ATENÇÃO, CAROLINA (INSTRUÇÃO INTERNA, NÃO FALE ISSO EM VOZ ALTA):
 - Ainda NÃO recebemos nenhum documento (foto de conta, boleto, comprovante).
 - Você DEVE continuar pedindo, com calma, que a pessoa envie pelo menos um documento (conta, fatura, comprovante, print do aplicativo).
-- Você PODE acolher, fazer perguntas para entender melhor a situação, mas NÃO deve avançar para explicar estratégia jurídica, não falar de valores, não dizer que "vai entrar com ação" de forma categórica.
+- Você PODE acolher, fazer perguntas para entender melhor a situação, mas NÃO deve avançar para explicar estratégia jurídica, não falar em valores, não dizer que "vai entrar com ação" de forma categórica.
 - Só quando os documentos forem enviados (o sistema vai te avisar no histórico com a tag [DOCUMENTO]) é que você pode começar a falar em "encaminhar para o advogado analisar" e próximos passos.
 `;
     } else {
-      // Já temos documento: Carolina pode ir para explicação leve de próximos passos
       systemPrompt += `
 ATENÇÃO, CAROLINA (INSTRUÇÃO INTERNA, NÃO FALE ISSO EM VOZ ALTA):
 - Já recebemos pelo menos um documento do cliente.
@@ -294,7 +294,7 @@ ATENÇÃO, CAROLINA (INSTRUÇÃO INTERNA, NÃO FALE ISSO EM VOZ ALTA):
     // 5) Enviar resposta pelo WhatsApp (Meta)
     if (!waPhoneId || !waToken) {
       console.error(
-        "WHATSAPP_PHONE_NUMBER_ID ou WHATSAPP_TOKEN não configurados (mensagem de texto)"
+        "WHATSAPP_PHONE_ID/NUMBER_ID ou WHATSAPP_TOKEN não configurados (mensagem de texto)"
       );
     } else {
       const graphRes = await fetch(
