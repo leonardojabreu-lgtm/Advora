@@ -16,7 +16,7 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 // token usado na verificação do webhook (GET)
 const VERIFY_TOKEN = "advora_verify";
 
-// 🌐 Cliente Supabase (backend)
+// 🌐 Cliente Supabase (backend) – usar SERVICE ROLE KEY
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // 🤖 Cliente OpenAI
@@ -63,6 +63,7 @@ export async function GET(request) {
 
 // 🔽 Baixa a mídia do WhatsApp (Meta) usando o media_id
 async function downloadMediaFromMeta(mediaId) {
+  // 1) Descobre a URL da mídia na API da Meta
   const metaInfoRes = await fetch(
     `https://graph.facebook.com/v22.0/${mediaId}`,
     {
@@ -83,6 +84,7 @@ async function downloadMediaFromMeta(mediaId) {
   const metaInfo = await metaInfoRes.json();
   const mediaUrl = metaInfo.url;
 
+  // 2) Baixa o arquivo binário dessa URL
   const fileRes = await fetch(mediaUrl, {
     headers: {
       Authorization: `Bearer ${WHATSAPP_TOKEN}`,
@@ -94,21 +96,26 @@ async function downloadMediaFromMeta(mediaId) {
     throw new Error("Erro ao fazer download da mídia");
   }
 
+  // 3) Converte para Buffer (Node)
   const arrayBuffer = await fileRes.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
   const mimeType = fileRes.headers.get("content-type") || "image/jpeg";
 
+  // 4) Devolve o binário + tipo de arquivo
   return { buffer, mimeType };
 }
 
 // ☁️ Sobe a mídia para um bucket "carolina" no Supabase
 async function uploadToSupabase(phone, buffer, mimeType) {
+  // extensão baseada no tipo de arquivo
   const ext = mimeType.includes("pdf") ? "pdf" : "jpg";
+
+  // organiza por pasta do telefone
   const fileName = `${phone}/${Date.now()}.${ext}`;
 
   const { data, error } = await supabase.storage
-    .from("carolina")
+    .from("carolina") // nome do bucket no Supabase
     .upload(fileName, buffer, {
       contentType: mimeType,
       upsert: false,
@@ -119,17 +126,18 @@ async function uploadToSupabase(phone, buffer, mimeType) {
     throw new Error("Erro ao salvar arquivo no Supabase");
   }
 
+  // pega a URL pública para esse arquivo
   const {
     data: { publicUrl },
   } = supabase.storage.from("carolina").getPublicUrl(fileName);
 
-  return publicUrl;
+  return publicUrl; // é isso que vamos mandar pra OpenAI Vision
 }
 
 // 👀 Classifica o tipo de documento via OpenAI (visão)
 async function classifyDocument(publicUrl) {
   const response = await openai.responses.create({
-    model: "gpt-4.1-mini",
+    model: "gpt-4.1-mini", // modelo multimodal (texto + imagem)
     input: [
       {
         role: "system",
@@ -162,6 +170,7 @@ Se não tiver certeza, use "outro".
     response_format: { type: "json_object" },
   });
 
+  // A API retorna um texto que deve ser um JSON
   const raw = response.output[0].content[0].text;
 
   let parsed;
@@ -172,11 +181,12 @@ Se não tiver certeza, use "outro".
     parsed = { tipo: "outro" };
   }
 
-  return parsed.tipo;
+  return parsed.tipo; // "rg", "cnh", "comprovante_residencia", etc.
 }
 
-// 🧾 Salva no histórico + consolida o checklist por telefone
+// 🧾 Salva no histórico de documentos + consolida o checklist por telefone
 async function updateDocsState(phone, docType, fileUrl) {
+  // 1) registra no histórico de documentos recebidos
   const { error: insertError } = await supabase
     .from("carolina_documents")
     .insert({
@@ -192,8 +202,10 @@ async function updateDocsState(phone, docType, fileUrl) {
     );
   }
 
+  // 2) monta o "patch" para a tabela de estado consolidado
   const patch = {};
 
+  // RG ou CNH contam como "documento de identidade com CPF"
   if (docType === "rg" || docType === "cnh") {
     patch.has_rg = true;
   }
@@ -212,6 +224,7 @@ async function updateDocsState(phone, docType, fileUrl) {
 
   patch.updated_at = new Date().toISOString();
 
+  // 3) upsert na tabela de estado (uma linha por telefone)
   const { data, error } = await supabase
     .from("carolina_docs_state")
     .upsert({ phone, ...patch }, { onConflict: "phone" })
@@ -226,6 +239,7 @@ async function updateDocsState(phone, docType, fileUrl) {
     throw new Error("Erro ao atualizar estado de documentos");
   }
 
+  // 4) devolve o estado atual desse telefone
   return data;
 }
 
@@ -255,14 +269,15 @@ function buildDocsStatusMessage(docsState) {
   if (docsState.has_fotos_danos) {
     recebidos.push("fotos de prejuízos/danos");
   }
+  // fotos de dano são opcionais: não entram na lista de "faltando"
 
   return { recebidos, faltando };
 }
 
 // 🧠 Histórico de conversa da Carolina (memória curta e limpa)
 
-const MAX_HISTORY_MESSAGES = 20;      // máximo de mensagens usadas no contexto
-const HISTORY_WINDOW_HOURS = 24;      // janela de tempo: últimas 24 horas
+const MAX_HISTORY_MESSAGES = 20; // máximo de mensagens usadas no contexto
+const HISTORY_WINDOW_HOURS = 24; // janela de tempo: últimas 24 horas
 
 // Calcula o timestamp mínimo para considerar no histórico
 function getHistorySinceISO() {
@@ -331,43 +346,13 @@ async function pruneHistory(phone) {
       .lt("created_at", sinceISO);
 
     if (error) {
-      console.error("Erro ao limpar histórico antigo da Carolina:", error.message);
+      console.error(
+        "Erro ao limpar histórico antigo da Carolina:",
+        error.message
+      );
     }
   } catch (err) {
     console.error("Erro inesperado em pruneHistory:", err);
-  }
-}
-
-// 🧠 Histórico de conversa da Carolina
-
-const MAX_HISTORY_MESSAGES = 12; // quantidade de mensagens passadas usadas no contexto
-
-// Carrega as últimas mensagens dessa pessoa
-async function loadHistory(phone) {
-  const { data, error } = await supabase
-    .from("carolina_history")
-    .select("role, content")
-    .eq("phone", phone)
-    .order("created_at", { ascending: true })
-    .limit(MAX_HISTORY_MESSAGES);
-
-  if (error) {
-    console.error("Erro ao carregar histórico da Carolina:", error.message);
-    return [];
-  }
-
-  // já devolve no formato que a OpenAI espera: [{ role, content }, ...]
-  return data || [];
-}
-
-// Salva uma mensagem no histórico
-async function saveMessage(phone, role, content) {
-  const { error } = await supabase
-    .from("carolina_history")
-    .insert({ phone, role, content });
-
-  if (error) {
-    console.error("Erro ao salvar histórico da Carolina:", error.message);
   }
 }
 
@@ -406,14 +391,15 @@ export async function POST(request) {
   const value = changes?.value;
   const message = value?.messages?.[0];
 
+  // Se não houver mensagem (ex.: status de entrega), só responde 200
   if (!message) {
     return new Response("NO_MESSAGE", { status: 200 });
   }
 
-  const phone = message.from;
+  const phone = message.from; // ex: "5521970138585"
 
   try {
-        // 🔵 FLUXO DE DOCUMENTOS (imagem ou PDF)
+    // 🔵 FLUXO DE DOCUMENTOS (imagem ou PDF)
     if (message.type === "image" || message.type === "document") {
       const mediaId =
         message.type === "image" ? message.image.id : message.document.id;
@@ -475,17 +461,6 @@ Se não estiver faltando nada, a Carolina deve dizer que recebeu tudo e que vai 
 
       const replyText = completion.output[0].content[0].text;
 
-      const MAX_HISTORY_MESSAGES = 20;
-const HISTORY_WINDOW_HOURS = 24;
-
-function getHistorySinceISO() { ... }
-
-async function loadHistory(phone) { ... }
-
-async function saveHistory(phone, role, content) { ... }
-
-async function pruneHistory(phone) { ... }
-
       // 🔹 envia resposta
       await sendWhatsappMessage(phone, replyText);
 
@@ -541,46 +516,6 @@ async function pruneHistory(phone) { ... }
   } catch (err) {
     console.error("Erro no webhook:", err);
     // Meta não gosta de 500, então sempre devolvemos 200
-    return new Response("ERROR", { status: 200 });
-  }
-}
-
-     // 🔵 FLUXO DE TEXTO NORMAL DA CAROLINA
-    if (message.type === "text") {
-      const userText = message.text.body;
-
-      // 🔹 carrega histórico de mensagens anteriores desse número
-      const history = await loadHistory(phone);
-
-      const completion = await openai.responses.create({
-        model: "gpt-4.1-mini",
-        input: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "system", content: ATENDIMENTO_PROMPT },
-          ...history,
-          { role: "user", content: userText },
-        ],
-      });
-
-      const replyText = completion.output[0].content[0].text;
-
-      await sendWhatsappMessage(phone, replyText);
-
-      // 🔹 salva no histórico (user + assistant)
-      await saveMessage(phone, "user", userText);
-      await saveMessage(phone, "assistant", replyText);
-
-      return new Response("OK_TEXT", { status: 200 });
-    }
-
-    await sendWhatsappMessage(
-      phone,
-      "Neste momento, consigo te atender melhor por texto ou enviando fotos/documentos dos casos, tudo bem?"
-    );
-
-    return new Response("OK_OTHER", { status: 200 });
-  } catch (err) {
-    console.error("Erro no webhook:", err);
     return new Response("ERROR", { status: 200 });
   }
 }
