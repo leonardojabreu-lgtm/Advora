@@ -259,6 +259,85 @@ function buildDocsStatusMessage(docsState) {
   return { recebidos, faltando };
 }
 
+// 🧠 Histórico de conversa da Carolina (memória curta e limpa)
+
+const MAX_HISTORY_MESSAGES = 20;      // máximo de mensagens usadas no contexto
+const HISTORY_WINDOW_HOURS = 24;      // janela de tempo: últimas 24 horas
+
+// Calcula o timestamp mínimo para considerar no histórico
+function getHistorySinceISO() {
+  const ms = HISTORY_WINDOW_HOURS * 60 * 60 * 1000;
+  const since = new Date(Date.now() - ms);
+  return since.toISOString();
+}
+
+// Carrega as últimas mensagens dessa pessoa dentro da janela de 24h
+// e já devolve no formato que a OpenAI espera: [{ role, content }, ...]
+async function loadHistory(phone) {
+  try {
+    const sinceISO = getHistorySinceISO();
+
+    const { data, error } = await supabase
+      .from("carolina_history")
+      .select("role, content, created_at")
+      .eq("phone", phone)
+      .gte("created_at", sinceISO)
+      .order("created_at", { ascending: true })
+      .limit(MAX_HISTORY_MESSAGES);
+
+    if (error) {
+      console.error("Erro ao carregar histórico da Carolina:", error.message);
+      return [];
+    }
+
+    if (!data || data.length === 0) return [];
+
+    // Mapeia para o formato esperado pela OpenAI
+    return data.map((row) => ({
+      role: row.role,
+      content: row.content,
+    }));
+  } catch (err) {
+    console.error("Erro inesperado em loadHistory:", err);
+    return [];
+  }
+}
+
+// Salva uma mensagem no histórico (user ou assistant)
+async function saveHistory(phone, role, content) {
+  try {
+    const { error } = await supabase
+      .from("carolina_history")
+      .insert({ phone, role, content });
+
+    if (error) {
+      console.error("Erro ao salvar histórico da Carolina:", error.message);
+    }
+  } catch (err) {
+    console.error("Erro inesperado em saveHistory:", err);
+  }
+}
+
+// Remove mensagens antigas (fora da janela de 24h)
+// Opcional: deixa o banco limpo, não afeta diretamente o contexto
+async function pruneHistory(phone) {
+  try {
+    const sinceISO = getHistorySinceISO();
+
+    const { error } = await supabase
+      .from("carolina_history")
+      .delete()
+      .eq("phone", phone)
+      .lt("created_at", sinceISO);
+
+    if (error) {
+      console.error("Erro ao limpar histórico antigo da Carolina:", error.message);
+    }
+  } catch (err) {
+    console.error("Erro inesperado em pruneHistory:", err);
+  }
+}
+
 // 🧠 Histórico de conversa da Carolina
 
 const MAX_HISTORY_MESSAGES = 12; // quantidade de mensagens passadas usadas no contexto
@@ -334,20 +413,25 @@ export async function POST(request) {
   const phone = message.from;
 
   try {
-    // 🔵 FLUXO DE DOCUMENTOS (imagem ou PDF)
+        // 🔵 FLUXO DE DOCUMENTOS (imagem ou PDF)
     if (message.type === "image" || message.type === "document") {
       const mediaId =
         message.type === "image" ? message.image.id : message.document.id;
 
+      // 1) Baixa a mídia da Meta
       const { buffer, mimeType } = await downloadMediaFromMeta(mediaId);
 
+      // 2) Sobe a mídia para o Supabase
       const publicUrl = await uploadToSupabase(phone, buffer, mimeType);
 
+      // 3) Classifica o tipo de documento via OpenAI Vision
       const docType = await classifyDocument(publicUrl);
 
+      // 4) Atualiza o estado de documentos no Supabase
       const docsState = await updateDocsState(phone, docType, publicUrl);
       const { recebidos, faltando } = buildDocsStatusMessage(docsState);
 
+      // 5) Monta um contexto extra só sobre documentos para a Carolina
       const docsContext = `
 Status documental deste cliente (telefone ${phone}):
 
@@ -367,7 +451,10 @@ Assim que você me enviar, eu te envio a procuração para finalizarmos o seu pr
 Se não estiver faltando nada, a Carolina deve dizer que recebeu tudo e que vai enviar a procuração.
       `.trim();
 
-      // 🔹 carrega histórico anterior
+      // 🔹 limpa histórico antigo (> 24h) desse número
+      await pruneHistory(phone);
+
+      // 🔹 carrega histórico recente desse número
       const history = await loadHistory(phone);
 
       // 🔹 gera resposta da Carolina
@@ -388,19 +475,75 @@ Se não estiver faltando nada, a Carolina deve dizer que recebeu tudo e que vai 
 
       const replyText = completion.output[0].content[0].text;
 
+      const MAX_HISTORY_MESSAGES = 20;
+const HISTORY_WINDOW_HOURS = 24;
+
+function getHistorySinceISO() { ... }
+
+async function loadHistory(phone) { ... }
+
+async function saveHistory(phone, role, content) { ... }
+
+async function pruneHistory(phone) { ... }
+
       // 🔹 envia resposta
       await sendWhatsappMessage(phone, replyText);
 
       // 🔹 salva no histórico (user + assistant)
-      await saveMessage(
+      await saveHistory(
         phone,
         "user",
         "Enviei um documento agora pelo WhatsApp."
       );
-      await saveMessage(phone, "assistant", replyText);
+      await saveHistory(phone, "assistant", replyText);
 
       return new Response("OK_MEDIA", { status: 200 });
     }
+
+    // 🔵 FLUXO DE TEXTO NORMAL DA CAROLINA
+    if (message.type === "text") {
+      const userText = message.text.body;
+
+      // 🔹 limpa histórico velho (> 24h) desse número
+      await pruneHistory(phone);
+
+      // 🔹 carrega histórico recente desse número
+      const history = await loadHistory(phone);
+
+      const completion = await openai.responses.create({
+        model: "gpt-4.1-mini",
+        input: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: ATENDIMENTO_PROMPT },
+          ...history,
+          { role: "user", content: userText },
+        ],
+      });
+
+      const replyText = completion.output[0].content[0].text;
+
+      await sendWhatsappMessage(phone, replyText);
+
+      // 🔹 salva no histórico (user + assistant)
+      await saveHistory(phone, "user", userText);
+      await saveHistory(phone, "assistant", replyText);
+
+      return new Response("OK_TEXT", { status: 200 });
+    }
+
+    // 🔵 QUALQUER OUTRO TIPO (áudio, sticker, etc.)
+    await sendWhatsappMessage(
+      phone,
+      "Neste momento, consigo te atender melhor por texto ou enviando fotos/documentos do caso, tudo bem?"
+    );
+
+    return new Response("OK_OTHER", { status: 200 });
+  } catch (err) {
+    console.error("Erro no webhook:", err);
+    // Meta não gosta de 500, então sempre devolvemos 200
+    return new Response("ERROR", { status: 200 });
+  }
+}
 
      // 🔵 FLUXO DE TEXTO NORMAL DA CAROLINA
     if (message.type === "text") {
