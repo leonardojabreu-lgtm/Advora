@@ -259,6 +259,39 @@ function buildDocsStatusMessage(docsState) {
   return { recebidos, faltando };
 }
 
+// 🧠 Histórico de conversa da Carolina
+
+const MAX_HISTORY_MESSAGES = 12; // quantidade de mensagens passadas usadas no contexto
+
+// Carrega as últimas mensagens dessa pessoa
+async function loadHistory(phone) {
+  const { data, error } = await supabase
+    .from("carolina_history")
+    .select("role, content")
+    .eq("phone", phone)
+    .order("created_at", { ascending: true })
+    .limit(MAX_HISTORY_MESSAGES);
+
+  if (error) {
+    console.error("Erro ao carregar histórico da Carolina:", error.message);
+    return [];
+  }
+
+  // já devolve no formato que a OpenAI espera: [{ role, content }, ...]
+  return data || [];
+}
+
+// Salva uma mensagem no histórico
+async function saveMessage(phone, role, content) {
+  const { error } = await supabase
+    .from("carolina_history")
+    .insert({ phone, role, content });
+
+  if (error) {
+    console.error("Erro ao salvar histórico da Carolina:", error.message);
+  }
+}
+
 // 📲 Envia mensagem de texto no WhatsApp pelo Graph API
 async function sendWhatsappMessage(phone, text) {
   const url = `https://graph.facebook.com/v22.0/${WHATSAPP_PHONE_ID}/messages`;
@@ -334,8 +367,10 @@ Assim que você me enviar, eu te envio a procuração para finalizarmos o seu pr
 Se não estiver faltando nada, a Carolina deve dizer que recebeu tudo e que vai enviar a procuração.
       `.trim();
 
-      const history = []; // futura integração com histórico, se quiser
+      // 🔹 carrega histórico anterior
+      const history = await loadHistory(phone);
 
+      // 🔹 gera resposta da Carolina
       const completion = await openai.responses.create({
         model: "gpt-4.1-mini",
         input: [
@@ -353,16 +388,26 @@ Se não estiver faltando nada, a Carolina deve dizer que recebeu tudo e que vai 
 
       const replyText = completion.output[0].content[0].text;
 
+      // 🔹 envia resposta
       await sendWhatsappMessage(phone, replyText);
+
+      // 🔹 salva no histórico (user + assistant)
+      await saveMessage(
+        phone,
+        "user",
+        "Enviei um documento agora pelo WhatsApp."
+      );
+      await saveMessage(phone, "assistant", replyText);
 
       return new Response("OK_MEDIA", { status: 200 });
     }
 
-    // 🔵 FLUXO DE TEXTO NORMAL DA CAROLINA
+     // 🔵 FLUXO DE TEXTO NORMAL DA CAROLINA
     if (message.type === "text") {
       const userText = message.text.body;
 
-      const history = []; // futura integração com histórico
+      // 🔹 carrega histórico de mensagens anteriores desse número
+      const history = await loadHistory(phone);
 
       const completion = await openai.responses.create({
         model: "gpt-4.1-mini",
@@ -377,6 +422,10 @@ Se não estiver faltando nada, a Carolina deve dizer que recebeu tudo e que vai 
       const replyText = completion.output[0].content[0].text;
 
       await sendWhatsappMessage(phone, replyText);
+
+      // 🔹 salva no histórico (user + assistant)
+      await saveMessage(phone, "user", userText);
+      await saveMessage(phone, "assistant", replyText);
 
       return new Response("OK_TEXT", { status: 200 });
     }
